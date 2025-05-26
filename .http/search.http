@@ -1,0 +1,10 @@
+# Search
+POST http://localhost:3000/search
+content-type: application/json
+
+{
+    "pattern": "logs",
+    "query": "select 1 as 'test', 1 = 1"
+}
+
+
