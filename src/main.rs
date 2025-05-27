@@ -1,12 +1,7 @@
 use anyhow::Result;
 use aws_sdk_s3::config::{Credentials, Region};
 use axum::Router;
-use routes::get_router;
-use schema::{create_logs_table, create_shards_table};
 use std::env;
-
-use db::connect_with_options;
-use state::AppState;
 use time::format_description;
 
 mod db;
@@ -18,12 +13,19 @@ mod shards;
 mod state;
 mod sync;
 
+use db::connect_with_options;
+use routes::get_router;
+use schema::{create_logs_table, create_shards_table};
+use state::AppState;
+
 const BUCKET: &'static str = "logs";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let subcommand = args.get(2).unwrap_or(&"api".to_owned()).clone();
+    let cwd = std::env::current_dir()?;
+
     println!("Running in mode: {}", &subcommand);
 
     let key_id = "root".to_string();
@@ -31,8 +33,8 @@ async fn main() -> Result<()> {
     let cred = Credentials::new(key_id, secret_key, None, None, "loaded-from-custom-env");
     let store_url = "http://localhost:9000";
 
-    let mut cwd = std::env::current_dir()?;
-    cwd.push("./master.db");
+    let mut master_path = cwd.clone();
+    master_path.push("./master.db");
     let master_path = format!("sqlite:{}", cwd.display());
     let master_pool = connect_with_options(&master_path).await?;
     create_shards_table(&master_pool).await?;
@@ -46,7 +48,7 @@ async fn main() -> Result<()> {
 
     sqlx::query("SELECT 1 = 1").execute(&master_pool).await?;
 
-    // TODO: This this should be autorotated periodically
+    // TODO: This this should be autorotated periodically somehow
     let mut shard_path = std::env::temp_dir();
     shard_path.push(format!("sqlite_temp_{}.db", uuid::Uuid::new_v4()));
     let shard_url = format!("sqlite:{}", shard_path.display());

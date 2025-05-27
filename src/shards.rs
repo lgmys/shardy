@@ -148,6 +148,7 @@ pub async fn execute_query(
         .map(|shard| execute_shard_query(client, bucket, &shard, query))
         .collect();
 
+    // TODO: run in sequences of at most 10 requests at the same time
     let future_results = join_all(futures).await;
 
     for res in future_results {
