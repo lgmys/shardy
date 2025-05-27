@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, time::Duration};
+use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 
 use aws_sdk_s3::{
     Client,
@@ -12,6 +12,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, SqlitePool, ValueRef};
 use sqlx::{FromRow, Row};
@@ -22,6 +23,8 @@ struct AppState {
     master_db: SqlitePool,
     shard_db: SqlitePool,
     db_file: PathBuf,
+    shard_filename: String,
+    shard_id: uuid::Uuid,
 }
 
 struct AppError(anyhow::Error);
@@ -37,6 +40,7 @@ struct Task {
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use std::str::FromStr;
 use tempfile::NamedTempFile;
+use time::format_description;
 use tokio::{fs::File, io::AsyncWriteExt};
 
 async fn connect_with_options(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
@@ -133,12 +137,26 @@ async fn periodical_sync(state: AppState) -> Result<()> {
     loop {
         println!("periodical sync running {}", db_file);
 
-        if checkpoint_and_sync(&state.shard_db, &state.client, db_file, BUCKET, "temp.db")
-            .await
-            .is_err()
+        if checkpoint_and_sync(
+            &state.shard_db,
+            &state.client,
+            db_file,
+            BUCKET,
+            &state.shard_filename,
+        )
+        .await
+        .is_err()
         {
             println!("could not sync")
         }
+
+        let shard = Shard {
+            name: "logs".to_owned(),
+            id: state.shard_id.to_string(),
+            s3_path: state.shard_filename.clone(),
+        };
+
+        post_shard(&shard).await?;
 
         interval.tick().await;
     }
@@ -155,6 +173,16 @@ async fn main() -> Result<()> {
     cwd.push("./master.db");
     let master_path = format!("sqlite:{}", cwd.display());
     let master_pool = connect_with_options(&master_path).await?;
+
+    let format = format_description::parse("[year]-[month]-[day]_[hour]_[minute]")?;
+
+    let shard_id = uuid::Uuid::new_v4();
+
+    let shard_filename = format!(
+        "logs.{}.{}.db",
+        time::UtcDateTime::now().format(&format)?,
+        &shard_id
+    );
 
     sqlx::query("SELECT 1 = 1").execute(&master_pool).await?;
 
@@ -194,6 +222,8 @@ async fn main() -> Result<()> {
         shard_db: shard_pool,
         master_db: master_pool,
         db_file: shard_path.clone(),
+        shard_filename: shard_filename.clone(),
+        shard_id: shard_id.clone(),
     };
 
     println!("api started");
@@ -209,7 +239,7 @@ async fn info() -> &'static str {
     "it works"
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, Deserialize, Serialize)]
 struct Shard {
     name: String,
     id: String,
@@ -219,7 +249,6 @@ struct Shard {
 #[derive(Deserialize, Debug)]
 struct SearchPayload {
     query: String,
-    pattern: String,
 }
 
 /// Download SQLite database from S3 to a temporary file
@@ -282,60 +311,102 @@ async fn execute_query(
     client: &Client,
     master_db: &SqlitePool,
     bucket: &str,
-    key: &str,
+    pattern: &str,
     query: &str,
-) -> Result<()> {
-    let shards = sqlx::query_as::<_, Shard>("SELECT * FROM shards")
+) -> Result<Vec<HashMap<String, String>>> {
+    let shards = sqlx::query_as::<_, Shard>("SELECT * FROM shards WHERE name = ?1")
+        .bind(pattern)
         .fetch_all(master_db)
         .await?;
 
-    dbg!(shards);
+    println!("============== running query:  {}", query);
 
-    // TODO: figure out what files to load from S3 based on the pattern and the query
-    let (pool, _temp_file) = open_database_from_s3(client, bucket, key).await?;
+    dbg!(&shards);
 
-    println!("Executing query: {}", query);
-    let rows = sqlx::query(query).fetch_all(&pool).await?;
+    let mut results: Vec<HashMap<String, String>> = vec![];
 
-    for row in rows {
-        for (i, col) in row.columns().iter().enumerate() {
-            let column_name = col.name();
+    for shard in shards {
+        // TODO: figure out what files to load from S3 based on the pattern and the query
+        let (pool, _temp_file) = open_database_from_s3(client, bucket, &shard.s3_path).await?;
 
-            if let Ok(val) = row.try_get::<i64, _>(i) {
-                println!("{}: {}", column_name, val);
-            } else if let Ok(val) = row.try_get::<String, _>(i) {
-                println!("{}: {}", column_name, val);
+        println!("Executing query: {}", query);
+        let rows = sqlx::query(query).fetch_all(&pool).await?;
+
+        for row in rows {
+            let mut row_as_map: HashMap<String, String> = HashMap::new();
+
+            for (i, col) in row.columns().iter().enumerate() {
+                let column_name = col.name();
+
+                if let Ok(val) = row.try_get::<i64, _>(i) {
+                    row_as_map.insert(column_name.to_owned(), format!("{}", val));
+                } else if let Ok(val) = row.try_get::<String, _>(i) {
+                    row_as_map.insert(column_name.to_owned(), format!("{}", val));
+                }
             }
+
+            results.push(row_as_map);
         }
+
+        pool.close().await;
     }
 
-    pool.close().await;
-
-    Ok(())
+    Ok(results)
 }
 
 async fn search(state: State<AppState>, payload: Json<SearchPayload>) -> impl IntoResponse {
+    let query = payload.query.to_lowercase();
+    let pattern: Vec<&str> = query.split("from ").collect();
+    let pattern = pattern.get(1).unwrap_or(&"").trim();
+
     // Fetch multiple buckets in parallel
-    if execute_query(
+    if let Ok(results) = execute_query(
         &state.client,
         &state.master_db,
         BUCKET,
-        "temp.db",
+        &pattern,
         &payload.query,
     )
     .await
-    .is_err()
     {
+        Json(results).into_response()
+    } else {
         return AppError(anyhow::anyhow!("err")).into_response();
     }
-
-    "search".into_response()
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         todo!()
     }
+}
+
+async fn store_shard(state: State<AppState>, payload: Json<Shard>) -> impl IntoResponse {
+    if sqlx::query("INSERT INTO shards (id, name, s3_path) VALUES(?1, ?2, ?3)")
+        .bind(&payload.id)
+        .bind(&payload.name)
+        .bind(&payload.s3_path)
+        .execute(&state.master_db)
+        .await
+        .is_err()
+    {
+        return "error registering shard".into_response();
+    }
+
+    "search".into_response()
+}
+
+async fn post_shard(payload: &Shard) -> Result<()> {
+    let client = reqwest::Client::new();
+
+    client
+        .post("http://localhost:3000/_shard")
+        .body(serde_json::to_string(payload)?)
+        .header("content-type", "application/json")
+        .send()
+        .await?;
+
+    Ok(())
 }
 
 // save log to in-memory sqlite
@@ -364,6 +435,7 @@ async fn start_app(state: AppState) -> Result<()> {
     let app = Router::new()
         .route("/", get(info))
         .route("/logs", post(logs))
+        .route("/_shard", post(store_shard))
         .route("/search", post(search))
         .with_state(state.clone());
 
