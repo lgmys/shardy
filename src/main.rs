@@ -209,7 +209,7 @@ async fn info() -> &'static str {
     "it works"
 }
 
-#[derive(FromRow)]
+#[derive(Debug, FromRow)]
 struct Shard {
     name: String,
     id: String,
@@ -285,8 +285,11 @@ async fn execute_query(
     key: &str,
     query: &str,
 ) -> Result<()> {
-    let objects = sqlx::query_as::<_, Shard>("SELECT * FROM users WHERE email = ? OR name = ?")
-        .fetch_all(master_db);
+    let shards = sqlx::query_as::<_, Shard>("SELECT * FROM shards")
+        .fetch_all(master_db)
+        .await?;
+
+    dbg!(shards);
 
     // TODO: figure out what files to load from S3 based on the pattern and the query
     let (pool, _temp_file) = open_database_from_s3(client, bucket, key).await?;

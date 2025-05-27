@@ -7,4 +7,3 @@ content-type: application/json
     "query": "select 1 as 'test', 1 = 1"
 }
 
-
