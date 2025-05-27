@@ -130,7 +130,7 @@ pub async fn execute_query(
     pattern: &str,
     query: &str,
 ) -> Result<Vec<HashMap<String, String>>> {
-    // TODO: make shard timestamp query dynamic
+    // TODO: make shard time window dynamic (based on query itself partially)
     let shards = sqlx::query_as::<_, Shard>(
         "SELECT * FROM shards WHERE name = ?1 AND timestamp > datetime('now', '-60 minutes')",
     )
