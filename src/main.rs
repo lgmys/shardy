@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, path::PathBuf, time::Duration};
+use std::{env, path::PathBuf, time::Duration};
 
 use aws_sdk_s3::{
     Client,
@@ -13,47 +13,22 @@ use axum::{
     routing::{get, post},
 };
 
-use futures::future::join_all;
-use serde::{Deserialize, Serialize};
-use sqlx::{Column, SqlitePool, ValueRef};
-use sqlx::{FromRow, Row};
+use db::connect_with_options;
+use errors::AppError;
+use object_storage::upload_db_to_s3;
+use serde::Deserialize;
+use shards::{Shard, checkpoint_and_sync, execute_query, post_shard};
+use sqlx::SqlitePool;
+use state::AppState;
+use time::format_description;
 
-#[derive(Clone)]
-struct AppState {
-    client: aws_sdk_s3::Client,
-    master_db: SqlitePool,
-    shard_db: SqlitePool,
-    db_file: PathBuf,
-    shard_filename: String,
-    shard_id: uuid::Uuid,
-    shard_start_time: String,
-}
-
-struct AppError(anyhow::Error);
+mod db;
+mod errors;
+mod object_storage;
+mod shards;
+mod state;
 
 const BUCKET: &'static str = "logs";
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Task {
-    key: String,
-    status: String,
-}
-
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
-use std::str::FromStr;
-use tempfile::NamedTempFile;
-use time::format_description;
-use tokio::{fs::File, io::AsyncWriteExt};
-
-async fn connect_with_options(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
-    let options = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path))?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(30));
-
-    SqlitePool::connect_with(options).await
-}
 
 async fn create_logs_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -88,48 +63,7 @@ async fn create_shards_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn upload_db_to_s3(
-    client: &Client,
-    db_path: &str,
-    bucket: &str,
-    key: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let body = tokio::fs::read(db_path).await?;
-
-    client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(body.into())
-        .send()
-        .await?;
-
-    println!("Database synced to S3: s3://{}/{}", bucket, key);
-    Ok(())
-}
-
-async fn checkpoint_and_sync(
-    pool: &SqlitePool,
-    s3_client: &Client,
-    db_path: &str,
-    bucket: &str,
-    key: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Force checkpoint to consolidate WAL into main database
-    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-        .execute(pool)
-        .await?;
-
-    // Small delay to ensure file system consistency
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Upload to S3
-    upload_db_to_s3(s3_client, db_path, bucket, key).await?;
-
-    Ok(())
-}
-
-async fn periodical_sync(state: AppState) -> Result<()> {
+async fn run_sync_periodically(state: AppState) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
 
     let db_file = &state
@@ -179,11 +113,8 @@ async fn main() -> Result<()> {
     let format = format_description::parse("[year]-[month]-[day]_[hour]_[minute]")?;
 
     let shard_id = uuid::Uuid::new_v4();
-
     let shard_start_range = time::UtcDateTime::now();
-
     let shart_start_range_string = shard_start_range.format(&format)?;
-
     let shard_filename = format!("logs.{}.{}.db", &shart_start_range_string, &shard_id);
 
     sqlx::query("SELECT 1 = 1").execute(&master_pool).await?;
@@ -228,145 +159,21 @@ async fn main() -> Result<()> {
         shard_start_time: shard_start_range.to_string(),
     };
 
-    tokio::spawn(periodical_sync(state.clone()));
+    tokio::spawn(run_sync_periodically(state.clone()));
 
     start_app(state.clone()).await?;
 
     Ok(())
 }
 
+// Routes
 async fn info() -> &'static str {
     "it works"
-}
-
-#[derive(Debug, FromRow, Deserialize, Serialize)]
-struct Shard {
-    name: String,
-    id: String,
-    s3_path: String,
-    timestamp: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct SearchPayload {
     query: String,
-}
-
-/// Download SQLite database from S3 to a temporary file
-async fn download_database(s3_client: &Client, bucket: &str, key: &str) -> Result<NamedTempFile> {
-    // Get object from S3
-    let response = s3_client
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await?;
-
-    // Create temporary file
-    let temp_file = NamedTempFile::new()?;
-
-    // Stream data from S3 to temp file
-    let mut stream = response.body.into_async_read();
-    let mut file_handle = File::from_std(temp_file.reopen()?);
-
-    tokio::io::copy(&mut stream, &mut file_handle).await?;
-    file_handle.flush().await?;
-
-    Ok(temp_file)
-}
-
-/// Download and open SQLite database from S3
-async fn open_database_from_s3(
-    client: &Client,
-    bucket: &str,
-    key: &str,
-) -> Result<(SqlitePool, NamedTempFile)> {
-    // Download database to temp file
-    let temp_file = download_database(client, bucket, key).await?;
-
-    // Open SQLite connection
-    let database_url = format!("sqlite:{}", temp_file.path().display());
-    let pool = SqlitePool::connect(&database_url).await?;
-
-    // Configure for read operations
-    sqlx::query("PRAGMA query_only = ON").execute(&pool).await?;
-    sqlx::query("PRAGMA cache_size = 64000")
-        .execute(&pool)
-        .await?; // 64MB cache
-    sqlx::query("PRAGMA mmap_size = 268435456")
-        .execute(&pool)
-        .await?; // 256MB mmap
-
-    Ok((pool, temp_file))
-}
-
-async fn execute_shard_query(
-    client: &Client,
-    bucket: &str,
-    shard: &Shard,
-    query: &str,
-) -> Result<Vec<HashMap<String, String>>> {
-    let mut results: Vec<HashMap<String, String>> = vec![];
-
-    let (pool, _temp_file) = open_database_from_s3(client, bucket, &shard.s3_path).await?;
-
-    let rows = sqlx::query(query).fetch_all(&pool).await?;
-
-    for row in rows {
-        let mut row_as_map: HashMap<String, String> = HashMap::new();
-
-        for (i, col) in row.columns().iter().enumerate() {
-            let column_name = col.name();
-
-            if let Ok(val) = row.try_get::<i64, _>(i) {
-                row_as_map.insert(column_name.to_owned(), format!("{}", val));
-            } else if let Ok(val) = row.try_get::<String, _>(i) {
-                row_as_map.insert(column_name.to_owned(), format!("{}", val));
-            }
-        }
-
-        results.push(row_as_map);
-    }
-
-    pool.close().await;
-
-    Ok(results)
-}
-
-async fn execute_query(
-    client: &Client,
-    master_db: &SqlitePool,
-    bucket: &str,
-    pattern: &str,
-    query: &str,
-) -> Result<Vec<HashMap<String, String>>> {
-    // TODO: make shard timestamp query dynamic
-    let shards = sqlx::query_as::<_, Shard>(
-        "SELECT * FROM shards WHERE name = ?1 AND timestamp > datetime('now', '-5 minutes')",
-    )
-    .bind(pattern)
-    .fetch_all(master_db)
-    .await?;
-
-    println!("==============");
-    println!("running query: {} on {} shard(s)", query, shards.len());
-
-    let mut combined_results: Vec<HashMap<String, String>> = vec![];
-
-    let futures: Vec<_> = shards
-        .iter()
-        .map(|shard| execute_shard_query(client, bucket, &shard, query))
-        .collect();
-
-    let future_results = join_all(futures).await;
-
-    for res in future_results {
-        combined_results.append(&mut res.unwrap().clone());
-    }
-
-    println!("results: {}", combined_results.len());
-
-    Ok(combined_results)
 }
 
 async fn search(state: State<AppState>, payload: Json<SearchPayload>) -> impl IntoResponse {
@@ -391,45 +198,19 @@ async fn search(state: State<AppState>, payload: Json<SearchPayload>) -> impl In
     }
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        todo!()
-    }
-}
-
 async fn store_shard(state: State<AppState>, payload: Json<Shard>) -> impl IntoResponse {
-    if sqlx::query("INSERT INTO shards (id, name, s3_path, timestamp) VALUES(?1, ?2, ?3, ?4)")
-        .bind(&payload.id)
-        .bind(&payload.name)
-        .bind(&payload.s3_path)
-        .bind(&payload.timestamp)
-        .execute(&state.master_db)
+    if shards::store_shard(&state.master_db, &payload)
         .await
         .is_err()
     {
         return "error registering shard".into_response();
     }
 
-    "search".into_response()
+    "acknowledged".into_response()
 }
 
-async fn post_shard(payload: &Shard) -> Result<()> {
-    let client = reqwest::Client::new();
-
-    client
-        .post("http://localhost:3000/_shard")
-        .body(serde_json::to_string(payload)?)
-        .header("content-type", "application/json")
-        .send()
-        .await?;
-
-    Ok(())
-}
-
-#[debug_handler]
 async fn logs(state: State<AppState>) -> impl IntoResponse {
-    // first, smart log parser should be defined so that we tell the noise from actual data.
-
+    // TODO: we should decide on mappings and the index automatically
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = time::UtcDateTime::now();
     let message = format!("http log {}", timestamp);
