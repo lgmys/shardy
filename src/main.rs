@@ -1,4 +1,4 @@
-use std::{any::Any, env, path::PathBuf, time::Duration};
+use std::{env, path::PathBuf, time::Duration};
 
 use aws_sdk_s3::{
     Client,
@@ -13,13 +13,14 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use sqlx::{Column, SqlitePool, ValueRef};
+use sqlx::{FromRow, Row};
 
 #[derive(Clone)]
 struct AppState {
     client: aws_sdk_s3::Client,
-    db: SqlitePool,
+    master_db: SqlitePool,
+    shard_db: SqlitePool,
     db_file: PathBuf,
 }
 
@@ -55,6 +56,22 @@ async fn create_logs_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
            id TEXT PRIMARY KEY,
            timestamp DATETIME NOT NULL,
            message TEXT NOT NULL
+       )
+       "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn create_shards_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+       CREATE TABLE IF NOT EXISTS shards (
+           id TEXT PRIMARY KEY,
+           name TEXT NOT NULL,
+           s3_path TEXT NOT NULL
        )
        "#,
     )
@@ -116,7 +133,7 @@ async fn periodical_sync(state: AppState) -> Result<()> {
     loop {
         println!("periodical sync running {}", db_file);
 
-        if checkpoint_and_sync(&state.db, &state.client, db_file, BUCKET, "temp.db")
+        if checkpoint_and_sync(&state.shard_db, &state.client, db_file, BUCKET, "temp.db")
             .await
             .is_err()
         {
@@ -134,21 +151,28 @@ async fn main() -> Result<()> {
     let cred = Credentials::new(key_id, secret_key, None, None, "loaded-from-custom-env");
     let store_url = "http://localhost:9000";
 
-    let mut temp_path = std::env::temp_dir();
-    temp_path.push(format!("sqlite_temp_{}.db", uuid::Uuid::new_v4()));
-    let database_url = format!("sqlite:{}", temp_path.display());
+    let mut cwd = std::env::current_dir()?;
+    cwd.push("./master.db");
+    let master_path = format!("sqlite:{}", cwd.display());
+    let master_pool = connect_with_options(&master_path).await?;
 
-    println!("{}", &database_url);
+    sqlx::query("SELECT 1 = 1").execute(&master_pool).await?;
 
-    let pool = connect_with_options(&database_url).await?;
+    let mut shard_path = std::env::temp_dir();
+    shard_path.push(format!("sqlite_temp_{}.db", uuid::Uuid::new_v4()));
+    let shard_url = format!("sqlite:{}", shard_path.display());
+
+    println!("shard database {}", &shard_url);
+    let shard_pool = connect_with_options(&shard_url).await?;
 
     sqlx::query("PRAGMA journal_mode = WAL")
-        .execute(&pool)
+        .execute(&shard_pool)
         .await?;
 
-    sqlx::query("SELECT 1 = 1").execute(&pool).await?;
+    sqlx::query("SELECT 1 = 1").execute(&shard_pool).await?;
 
-    create_logs_table(&pool).await?;
+    create_logs_table(&shard_pool).await?;
+    create_shards_table(&master_pool).await?;
 
     let args: Vec<String> = env::args().collect();
     let subcommand = args.get(2).unwrap_or(&"api".to_owned()).clone();
@@ -167,8 +191,9 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         client: client.clone(),
-        db: pool,
-        db_file: temp_path.clone(),
+        shard_db: shard_pool,
+        master_db: master_pool,
+        db_file: shard_path.clone(),
     };
 
     println!("api started");
@@ -182,6 +207,13 @@ async fn main() -> Result<()> {
 
 async fn info() -> &'static str {
     "it works"
+}
+
+#[derive(FromRow)]
+struct Shard {
+    name: String,
+    id: String,
+    s3_path: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -246,7 +278,17 @@ async fn open_database_from_s3(
 }
 
 /// Execute a simple query and return results as JSON-serializable structs
-async fn execute_query(client: &Client, bucket: &str, key: &str, query: &str) -> Result<()> {
+async fn execute_query(
+    client: &Client,
+    master_db: &SqlitePool,
+    bucket: &str,
+    key: &str,
+    query: &str,
+) -> Result<()> {
+    let objects = sqlx::query_as::<_, Shard>("SELECT * FROM users WHERE email = ? OR name = ?")
+        .fetch_all(master_db);
+
+    // TODO: figure out what files to load from S3 based on the pattern and the query
     let (pool, _temp_file) = open_database_from_s3(client, bucket, key).await?;
 
     println!("Executing query: {}", query);
@@ -270,12 +312,16 @@ async fn execute_query(client: &Client, bucket: &str, key: &str, query: &str) ->
 }
 
 async fn search(state: State<AppState>, payload: Json<SearchPayload>) -> impl IntoResponse {
-    dbg!(&payload);
-
     // Fetch multiple buckets in parallel
-    if execute_query(&state.client, BUCKET, "temp.db", &payload.query)
-        .await
-        .is_err()
+    if execute_query(
+        &state.client,
+        &state.master_db,
+        BUCKET,
+        "temp.db",
+        &payload.query,
+    )
+    .await
+    .is_err()
     {
         return AppError(anyhow::anyhow!("err")).into_response();
     }
@@ -302,7 +348,7 @@ async fn logs(state: State<AppState>) -> impl IntoResponse {
         .bind(id)
         .bind(timestamp.to_string())
         .bind(message)
-        .execute(&state.db)
+        .execute(&state.shard_db)
         .await
     {
         return AppError(anyhow::anyhow!(err)).into_response();
