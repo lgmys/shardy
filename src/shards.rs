@@ -143,6 +143,9 @@ pub async fn execute_query(
 
     let mut combined_results: Vec<HashMap<String, String>> = vec![];
 
+    // PERF: in future, when we have dedicated nodes for quering, it would be possible to delegate
+    // query operations to connected workers. It could work by sending the query and shard list out to workers
+    // via tcp connection, then waiting for response.
     let futures: Vec<_> = shards
         .iter()
         .map(|shard| execute_shard_query(client, bucket, &shard, query))

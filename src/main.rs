@@ -24,9 +24,9 @@ const BUCKET: &'static str = "logs";
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let subcommand = args.get(2).unwrap_or(&"api".to_owned()).clone();
-    let cwd = std::env::current_dir()?;
-
     println!("Running in mode: {}", &subcommand);
+
+    let cwd = std::env::current_dir()?;
 
     let key_id = "root".to_string();
     let secret_key = "changeme".to_string();
@@ -35,8 +35,9 @@ async fn main() -> Result<()> {
 
     let mut master_path = cwd.clone();
     master_path.push("./master.db");
-    let master_path = format!("sqlite:{}", cwd.display());
+    let master_path = format!("sqlite:{}", master_path.display());
     let master_pool = connect_with_options(&master_path).await?;
+
     create_shards_table(&master_pool).await?;
 
     let format = format_description::parse("[year]-[month]-[day]_[hour]_[minute]")?;
