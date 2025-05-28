@@ -6,13 +6,17 @@ use sqlx::Column;
 use sqlx::Row;
 use sqlx::{FromRow, SqlitePool};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
+use tokio::sync::Mutex;
 
+use crate::messages::Message;
+use crate::messages::MessageSearchRequest;
 use crate::object_storage::download_database;
 use crate::object_storage::upload_db_to_s3;
 
-#[derive(Debug, FromRow, Deserialize, Serialize)]
+#[derive(Debug, FromRow, Clone, Deserialize, Serialize)]
 pub struct Shard {
     pub name: String,
     pub id: String,
@@ -90,7 +94,7 @@ async fn open_database_from_s3(
     Ok((pool, temp_file))
 }
 
-async fn execute_shard_query(
+pub async fn execute_shard_query(
     client: &Client,
     bucket: &str,
     shard: &Shard,
@@ -123,10 +127,9 @@ async fn execute_shard_query(
     Ok(results)
 }
 
-pub async fn execute_query(
-    client: &Client,
+pub async fn schedule_query(
     master_db: &SqlitePool,
-    bucket: &str,
+    commands: Arc<Mutex<Vec<String>>>,
     pattern: &str,
     query: &str,
 ) -> Result<Vec<HashMap<String, String>>> {
@@ -141,22 +144,33 @@ pub async fn execute_query(
     println!("==============");
     println!("running query: {} on {} shard(s)", query, shards.len());
 
+    for shard in shards {
+        commands.lock().await.push(
+            serde_json::to_string(&Message::SearchRequest(MessageSearchRequest {
+                shard: shard.clone(),
+                id: format!(""),
+                query: query.to_owned(),
+            }))
+            .unwrap(),
+        );
+    }
+
     let mut combined_results: Vec<HashMap<String, String>> = vec![];
 
     // PERF: in future, when we have dedicated nodes for quering, it would be possible to delegate
     // query operations to connected workers. It could work by sending the query and shard list out to workers
     // via tcp connection, then waiting for response.
-    let futures: Vec<_> = shards
-        .iter()
-        .map(|shard| execute_shard_query(client, bucket, &shard, query))
-        .collect();
+    // let futures: Vec<_> = shards
+    //     .iter()
+    //     .map(|shard| execute_shard_query(client, bucket, &shard, query))
+    //     .collect();
 
     // TODO: run in sequences of at most 10 requests at the same time
-    let future_results = join_all(futures).await;
-
-    for res in future_results {
-        combined_results.append(&mut res.unwrap().clone());
-    }
+    // let future_results = join_all(futures).await;
+    //
+    // for res in future_results {
+    //     combined_results.append(&mut res.unwrap().clone());
+    // }
 
     println!("results: {}", combined_results.len());
 

@@ -9,11 +9,12 @@ use serde::Deserialize;
 use crate::{
     BUCKET,
     errors::AppError,
-    shards::{self, Shard, execute_query},
-    state::AppState,
+    messages::{Message, MessageLog},
+    shards::{self, Shard, schedule_query},
+    state::ApiState,
 };
 
-pub fn get_router(state: AppState) -> Router<AppState> {
+pub fn get_router(state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/", get(info))
         .route("/logs", post(logs))
@@ -32,21 +33,15 @@ struct SearchPayload {
     query: String,
 }
 
-async fn search(state: State<AppState>, payload: Json<SearchPayload>) -> impl IntoResponse {
+async fn search(state: State<ApiState>, payload: Json<SearchPayload>) -> impl IntoResponse {
     let query = payload.query.to_lowercase();
     let pattern: Vec<&str> = query.split("from ").collect();
     let pattern = pattern.get(1).unwrap_or(&"").trim();
     let pattern: Vec<&str> = pattern.split("where").collect();
     let pattern = pattern.get(0).unwrap_or(&"").trim();
 
-    if let Ok(results) = execute_query(
-        &state.client,
-        &state.master_db,
-        BUCKET,
-        &pattern,
-        &payload.query,
-    )
-    .await
+    if let Ok(results) =
+        schedule_query(&state.master_db, state.commands.clone(), BUCKET, &pattern).await
     {
         Json(results).into_response()
     } else {
@@ -54,7 +49,7 @@ async fn search(state: State<AppState>, payload: Json<SearchPayload>) -> impl In
     }
 }
 
-async fn store_shard(state: State<AppState>, payload: Json<Shard>) -> impl IntoResponse {
+async fn store_shard(state: State<ApiState>, payload: Json<Shard>) -> impl IntoResponse {
     if shards::store_shard(&state.master_db, &payload)
         .await
         .is_err()
@@ -65,21 +60,15 @@ async fn store_shard(state: State<AppState>, payload: Json<Shard>) -> impl IntoR
     "acknowledged".into_response()
 }
 
-async fn logs(state: State<AppState>) -> impl IntoResponse {
+async fn logs(state: State<ApiState>) -> impl IntoResponse {
     // TODO: we should decide on mappings and the index automatically
-    let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = time::UtcDateTime::now();
-    let message = format!("http log {}", timestamp);
 
-    if let Err(err) = sqlx::query("INSERT INTO logs (id, timestamp, message) VALUES (?1, ?2, ?3)")
-        .bind(id)
-        .bind(timestamp.to_string())
-        .bind(message)
-        .execute(&state.shard_db)
-        .await
-    {
-        return AppError(anyhow::anyhow!(err)).into_response();
-    }
+    state.commands.lock().await.push(
+        serde_json::to_string(&Message::Log(MessageLog {
+            log: format!("log message"),
+        }))
+        .unwrap(),
+    );
 
     "logged".into_response()
 }

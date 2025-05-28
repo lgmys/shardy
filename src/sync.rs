@@ -5,10 +5,10 @@ use anyhow::Result;
 use crate::{
     BUCKET,
     shards::{Shard, checkpoint_and_sync, post_shard},
-    state::AppState,
+    state::WorkerState,
 };
 
-pub async fn run_sync_periodically(state: AppState) -> Result<()> {
+pub async fn run_sync_periodically(state: WorkerState) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
 
     let db_file = &state
