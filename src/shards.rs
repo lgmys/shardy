@@ -19,15 +19,23 @@ use crate::object_storage::upload_db_to_s3;
 pub type QueryResults = Vec<HashMap<String, String>>;
 
 #[derive(Debug, FromRow, Clone, Deserialize, Serialize)]
-pub struct Shard {
+pub struct ShardMetadata {
     pub name: String,
     pub id: String,
     pub s3_path: String,
     pub timestamp: String,
 }
 
-pub async fn post_shard(payload: &Shard) -> Result<()> {
+pub struct ShardHandle {
+    pub metadata: ShardMetadata,
+    pub pool: SqlitePool,
+    pub shard_filename: String,
+}
+
+pub async fn post_shard(payload: &ShardMetadata) -> Result<()> {
     let client = reqwest::Client::new();
+
+    dbg!(&payload);
 
     client
         .post("http://localhost:3000/_shard")
@@ -42,8 +50,7 @@ pub async fn post_shard(payload: &Shard) -> Result<()> {
 pub async fn checkpoint_and_sync(
     pool: &SqlitePool,
     s3_client: &Client,
-    db_path: &str,
-    bucket: &str,
+    db_file_path: &str,
     key: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Force checkpoint to consolidate WAL into main database
@@ -54,12 +61,12 @@ pub async fn checkpoint_and_sync(
     // Small delay to ensure file system consistency
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    upload_db_to_s3(s3_client, db_path, bucket, key).await?;
+    upload_db_to_s3(s3_client, db_file_path, key).await?;
 
     Ok(())
 }
 
-pub async fn store_shard(db: &SqlitePool, shard: &Shard) -> Result<()> {
+pub async fn store_shard(db: &SqlitePool, shard: &ShardMetadata) -> Result<()> {
     let exists = sqlx::query("SELECT * FROM shards WHERE id = ?1")
         .bind(&shard.id)
         .fetch_optional(db)
@@ -70,7 +77,6 @@ pub async fn store_shard(db: &SqlitePool, shard: &Shard) -> Result<()> {
         return Ok(());
     }
 
-    // TODO: Add unique check
     sqlx::query("INSERT INTO shards (id, name, s3_path, timestamp) VALUES(?1, ?2, ?3, ?4)")
         .bind(&shard.id)
         .bind(&shard.name)
@@ -82,14 +88,9 @@ pub async fn store_shard(db: &SqlitePool, shard: &Shard) -> Result<()> {
     Ok(())
 }
 
-/// Download and open SQLite database from S3
-async fn open_database_from_s3(
-    client: &Client,
-    bucket: &str,
-    key: &str,
-) -> Result<(SqlitePool, NamedTempFile)> {
+async fn open_database_from_s3(client: &Client, key: &str) -> Result<(SqlitePool, NamedTempFile)> {
     // Download database to temp file
-    let temp_file = download_database(client, bucket, key).await?;
+    let temp_file = download_database(client, key).await?;
 
     // Open SQLite connection
     let database_url = format!("sqlite:{}", temp_file.path().display());
@@ -109,13 +110,12 @@ async fn open_database_from_s3(
 
 pub async fn execute_shard_query(
     client: &Client,
-    bucket: &str,
-    shard: &Shard,
+    shard: &ShardMetadata,
     query: &str,
 ) -> Result<QueryResults> {
     let mut results: QueryResults = vec![];
 
-    let (pool, _temp_file) = open_database_from_s3(client, bucket, &shard.s3_path).await?;
+    let (pool, _temp_file) = open_database_from_s3(client, &shard.s3_path).await?;
 
     let rows = sqlx::query(query).fetch_all(&pool).await?;
 
@@ -148,7 +148,7 @@ pub async fn schedule_query(
     query: &str,
 ) -> Result<QueryResults> {
     // TODO: make shard time window dynamic (based on query itself partially)
-    let shards = sqlx::query_as::<_, Shard>(
+    let shards = sqlx::query_as::<_, ShardMetadata>(
         "SELECT * FROM shards WHERE name = ?1 AND timestamp > datetime('now', '-60 minutes')",
     )
     .bind(pattern)

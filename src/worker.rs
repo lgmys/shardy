@@ -1,5 +1,4 @@
 use crate::{
-    BUCKET,
     messages::{Message, MessageSearchResponse},
     shards::execute_shard_query,
     state::WorkerState,
@@ -8,7 +7,7 @@ use crate::{
 use anyhow::Result;
 use tokio::io::{self, AsyncReadExt};
 
-pub async fn create_log(state: &WorkerState) {
+pub async fn create_log(state: WorkerState) {
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = time::UtcDateTime::now();
     let message = format!("http log {}", timestamp);
@@ -17,7 +16,7 @@ pub async fn create_log(state: &WorkerState) {
         .bind(id)
         .bind(timestamp.to_string())
         .bind(message)
-        .execute(&state.shard_db)
+        .execute(&state.shard.lock().await.pool)
         .await
     {
         println!("error {}", err);
@@ -70,20 +69,22 @@ pub async fn start(state: WorkerState) -> Result<()> {
 
                 match message {
                     Message::Log(message_log) => {
-                        create_log(&state).await;
+                        create_log(state.clone()).await;
                     }
                     Message::SearchRequest(message_search_request) => {
                         let shard_results = match execute_shard_query(
                             &state.client,
-                            BUCKET,
                             &message_search_request.shard,
                             &message_search_request.query,
                         )
                         .await
                         {
                             Ok(shard_results) => shard_results,
-                            Err(_) => {
-                                println!("query failure");
+                            Err(e) => {
+                                println!(
+                                    "query failure, shard: {}, error: {}",
+                                    &message_search_request.shard.id, e
+                                );
 
                                 vec![]
                             }

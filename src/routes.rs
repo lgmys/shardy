@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::{
     errors::AppError,
     messages::{Message, MessageLog},
-    shards::{self, Shard, schedule_query},
+    shards::{self, ShardMetadata, schedule_query},
     state::ApiState,
 };
 
@@ -54,7 +54,7 @@ async fn search(state: State<ApiState>, payload: Json<SearchPayload>) -> impl In
     }
 }
 
-async fn store_shard(state: State<ApiState>, payload: Json<Shard>) -> impl IntoResponse {
+async fn store_shard(state: State<ApiState>, payload: Json<ShardMetadata>) -> impl IntoResponse {
     if shards::store_shard(&state.master_db, &payload)
         .await
         .is_err()

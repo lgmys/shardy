@@ -1,9 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 
-use crate::messages::MessageSearchResponse;
+use crate::{messages::MessageSearchResponse, shards::ShardHandle};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -16,9 +16,5 @@ pub struct ApiState {
 #[derive(Clone)]
 pub struct WorkerState {
     pub client: aws_sdk_s3::Client,
-    pub shard_db: SqlitePool,
-    pub db_file: PathBuf,
-    pub shard_filename: String,
-    pub shard_id: uuid::Uuid,
-    pub shard_start_time: String,
+    pub shard: Arc<Mutex<ShardHandle>>,
 }

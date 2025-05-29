@@ -4,36 +4,33 @@ use tempfile::NamedTempFile;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+use crate::BUCKET;
+
 pub async fn upload_db_to_s3(
     client: &Client,
-    db_path: &str,
-    bucket: &str,
+    db_file: &str,
     key: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let body = tokio::fs::read(db_path).await?;
+    let body = tokio::fs::read(db_file).await?;
 
     client
         .put_object()
-        .bucket(bucket)
+        .bucket(BUCKET)
         .key(key)
         .body(body.into())
         .send()
         .await?;
 
-    println!("Database synced to S3: s3://{}/{}", bucket, key);
+    println!("Database synced to S3: s3://{}/{}", BUCKET, key);
     Ok(())
 }
 
 /// Download SQLite database from S3 to a temporary file
-pub async fn download_database(
-    s3_client: &Client,
-    bucket: &str,
-    key: &str,
-) -> Result<NamedTempFile> {
+pub async fn download_database(s3_client: &Client, key: &str) -> Result<NamedTempFile> {
     // Get object from S3
     let response = s3_client
         .get_object()
-        .bucket(bucket)
+        .bucket(BUCKET)
         .key(key)
         .send()
         .await?;

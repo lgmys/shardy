@@ -4,7 +4,7 @@ use aws_sdk_s3::{
     config::{Credentials, Region},
 };
 use axum::Router;
-use messages::MessageSearchResponse;
+use shards::{ShardHandle, ShardMetadata};
 use std::{collections::HashMap, env, sync::Arc};
 use time::format_description;
 use tokio::sync::Mutex;
@@ -96,9 +96,7 @@ async fn start_web(state: ApiState) -> Result<()> {
     Ok(())
 }
 
-async fn start_worker() -> Result<()> {
-    let client = get_s3_client();
-
+pub async fn get_shard() -> Result<ShardHandle> {
     let format = format_description::parse("[year]-[month]-[day]_[hour]_[minute]")?;
     let shard_id = uuid::Uuid::new_v4();
     let shard_start_range = time::UtcDateTime::now();
@@ -111,21 +109,35 @@ async fn start_worker() -> Result<()> {
     let shard_url = format!("sqlite:{}", shard_path.display());
     let shard_pool = connect_with_options(&shard_url).await?;
 
+    sqlx::query("SELECT 1 = 1").execute(&shard_pool).await?;
+
     create_logs_table(&shard_pool).await?;
 
-    sqlx::query("SELECT 1 = 1").execute(&shard_pool).await?;
+    Ok(ShardHandle {
+        metadata: ShardMetadata {
+            timestamp: shard_start_range.to_string(),
+            s3_path: shard_filename.clone(),
+            id: shard_id.to_string(),
+            name: "logs".to_owned(),
+        },
+        pool: shard_pool,
+        shard_filename: shard_path.to_str().unwrap().to_owned(),
+    })
+}
+
+async fn start_worker() -> Result<()> {
+    let client = get_s3_client();
 
     let state = WorkerState {
         client: client.clone(),
-        shard_db: shard_pool,
-        db_file: shard_path.clone(),
-        shard_filename: shard_filename.clone(),
-        shard_id: shard_id.clone(),
-        shard_start_time: shard_start_range.to_string(),
+        shard: Arc::new(Mutex::new(get_shard().await?)),
     };
 
     // NOTE: periodically syncs temp log file to s3
+
     tokio::spawn(sync::run_sync_periodically(state.clone()));
+    tokio::spawn(sync::regenerate_shard(state.clone()));
+
     let _ = tokio::spawn(worker::start(state.clone())).await?;
 
     Ok(())
