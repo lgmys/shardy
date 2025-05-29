@@ -1,4 +1,4 @@
-# Search
+### Search
 POST http://localhost:3000/search
 content-type: application/json
 
@@ -6,3 +6,5 @@ content-type: application/json
     "query": "select id, timestamp, message from logs where timestamp > datetime('now', '-10 minutes')"
 }
 
+### Log
+POST http://localhost:3000/logs

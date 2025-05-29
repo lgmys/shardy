@@ -1,7 +1,12 @@
-use crate::{BUCKET, messages::Message, shards::execute_shard_query, state::WorkerState};
+use crate::{
+    BUCKET,
+    messages::{Message, MessageSearchResponse},
+    shards::execute_shard_query,
+    state::WorkerState,
+};
 
 use anyhow::Result;
-use tokio::io;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 
 pub async fn create_log(state: &WorkerState) {
     let id = uuid::Uuid::new_v4().to_string();
@@ -25,29 +30,38 @@ pub async fn start(state: WorkerState) -> Result<()> {
     let socket = tokio::net::TcpSocket::new_v4()?;
     let mut stream = socket.connect("127.0.0.1:6666".parse()?).await?;
 
-    let (r, w) = stream.split();
+    let (mut r, w) = stream.split();
 
     println!("connected coordinator");
 
     loop {
         // Wait for the socket to be readable
-        r.readable().await?;
+        r.readable().await.expect("not readable");
 
-        // Creating the buffer **after** the `await` prevents it from
-        // being stored in the async task.
-        let mut buf = [0; 4096];
+        let mut len_bytes = [0u8; 4];
+
+        r.read_exact(&mut len_bytes)
+            .await
+            .expect("could not read length");
+
+        let len = u32::from_be_bytes(len_bytes) as usize;
+
+        let mut buf = vec![0; len];
 
         // Try to read data, this may still fail with `WouldBlock`
         // if the readiness event is a false positive.
-        match r.try_read(&mut buf) {
-            Ok(0) => {
-                continue;
-            }
+        match r.read_exact(&mut buf).await {
             Ok(n) => {
+                if n == 0 {
+                    continue;
+                }
+
                 let message_string = String::from_utf8(buf[..n].into())?;
+                println!("=========");
                 println!("{:?}", &message_string);
 
-                let message: Message = serde_json::from_str(&message_string)?;
+                let message: Message =
+                    serde_json::from_str(&message_string).expect("could not parse message");
 
                 match message {
                     Message::Log(message_log) => {
@@ -58,17 +72,35 @@ pub async fn start(state: WorkerState) -> Result<()> {
                     Message::SearchRequest(message_search_request) => {
                         dbg!(&message_search_request);
 
-                        let shard_results = execute_shard_query(
+                        let shard_results = match execute_shard_query(
                             &state.client,
                             BUCKET,
                             &message_search_request.shard,
                             &message_search_request.query,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(shard_results) => shard_results,
+                            Err(_) => {
+                                println!("query failure");
 
-                        dbg!(shard_results);
+                                vec![]
+                            }
+                        };
 
-                        if w.try_write(&format!("omg").into_bytes()).is_err() {
+                        let search_response = MessageSearchResponse {
+                            id: message_search_request.id,
+                            payload: format!(""),
+                        };
+
+                        let search_response = Message::SearchResponse(search_response);
+                        let search_response = serde_json::to_string(&search_response)?;
+                        let search_response = search_response.into_bytes();
+
+                        if w.try_write(&search_response.len().to_be_bytes()).is_err() {
+                            println!("error");
+                        }
+                        if w.try_write(&search_response).is_err() {
                             println!("error");
                         }
                     }
@@ -79,6 +111,7 @@ pub async fn start(state: WorkerState) -> Result<()> {
                 continue;
             }
             Err(e) => {
+                eprintln!("{}", e);
                 return Err(e.into());
             }
         }

@@ -7,7 +7,6 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    BUCKET,
     errors::AppError,
     messages::{Message, MessageLog},
     shards::{self, Shard, schedule_query},
@@ -40,8 +39,14 @@ async fn search(state: State<ApiState>, payload: Json<SearchPayload>) -> impl In
     let pattern: Vec<&str> = pattern.split("where").collect();
     let pattern = pattern.get(0).unwrap_or(&"").trim();
 
-    if let Ok(results) =
-        schedule_query(&state.master_db, state.commands.clone(), BUCKET, &pattern).await
+    if let Ok(results) = schedule_query(
+        &state.master_db,
+        state.commands.clone(),
+        state.results.clone(),
+        &pattern,
+        &query,
+    )
+    .await
     {
         Json(results).into_response()
     } else {

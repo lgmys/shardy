@@ -1,6 +1,5 @@
 use anyhow::Result;
 use aws_sdk_s3::Client;
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use sqlx::Column;
 use sqlx::Row;
@@ -13,6 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::messages::Message;
 use crate::messages::MessageSearchRequest;
+use crate::messages::MessageSearchResponse;
 use crate::object_storage::download_database;
 use crate::object_storage::upload_db_to_s3;
 
@@ -130,6 +130,7 @@ pub async fn execute_shard_query(
 pub async fn schedule_query(
     master_db: &SqlitePool,
     commands: Arc<Mutex<Vec<String>>>,
+    results: Arc<Mutex<HashMap<String, MessageSearchResponse>>>,
     pattern: &str,
     query: &str,
 ) -> Result<Vec<HashMap<String, String>>> {
@@ -144,11 +145,18 @@ pub async fn schedule_query(
     println!("==============");
     println!("running query: {} on {} shard(s)", query, shards.len());
 
+    let mut queries: Vec<String> = vec![];
+
     for shard in shards {
+        let uuid = uuid::Uuid::new_v4();
+        let uuid = uuid.to_string();
+
+        queries.push(uuid.clone());
+
         commands.lock().await.push(
             serde_json::to_string(&Message::SearchRequest(MessageSearchRequest {
                 shard: shard.clone(),
-                id: format!(""),
+                id: uuid,
                 query: query.to_owned(),
             }))
             .unwrap(),
@@ -157,13 +165,24 @@ pub async fn schedule_query(
 
     let mut combined_results: Vec<HashMap<String, String>> = vec![];
 
-    // PERF: in future, when we have dedicated nodes for quering, it would be possible to delegate
-    // query operations to connected workers. It could work by sending the query and shard list out to workers
-    // via tcp connection, then waiting for response.
-    // let futures: Vec<_> = shards
-    //     .iter()
-    //     .map(|shard| execute_shard_query(client, bucket, &shard, query))
-    //     .collect();
+    let mut count: usize = 0;
+
+    loop {
+        for id in queries.clone() {
+            if let Some(result) = results.lock().await.get(&id) {
+                count += 1;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        if count == queries.len() {
+            println!("all queries executed");
+            break;
+        } else {
+            println!("{} queries done", count);
+        }
+    }
 
     // TODO: run in sequences of at most 10 requests at the same time
     // let future_results = join_all(futures).await;
@@ -173,6 +192,8 @@ pub async fn schedule_query(
     // }
 
     println!("results: {}", combined_results.len());
+
+    println!("==============");
 
     Ok(combined_results)
 }

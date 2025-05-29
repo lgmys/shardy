@@ -14,7 +14,7 @@ pub struct MessageSearchRequest {
     pub shard: Shard,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageSearchResponse {
     pub id: String,
     pub payload: String,

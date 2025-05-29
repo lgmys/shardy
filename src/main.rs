@@ -4,7 +4,8 @@ use aws_sdk_s3::{
     config::{Credentials, Region},
 };
 use axum::Router;
-use std::{env, sync::Arc};
+use messages::MessageSearchResponse;
+use std::{collections::HashMap, env, sync::Arc};
 use time::format_description;
 use tokio::sync::Mutex;
 
@@ -65,11 +66,13 @@ async fn main() -> Result<()> {
     let client = get_s3_client();
 
     let commands = Arc::new(Mutex::new(vec![]));
+    let search_results = Arc::new(Mutex::new(HashMap::new()));
 
     let state = ApiState {
         client: client.clone(),
         master_db: master_pool,
         commands,
+        results: search_results,
     };
 
     if subcommand == "worker" {
