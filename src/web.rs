@@ -77,3 +77,14 @@ async fn logs(state: State<ApiState>) -> impl IntoResponse {
 
     "logged".into_response()
 }
+
+pub async fn init_web(state: ApiState) -> Result<()> {
+    let router = Router::new()
+        .merge(get_router(state.clone()))
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, router).await?;
+
+    Ok(())
+}
