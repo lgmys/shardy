@@ -39,6 +39,8 @@ pub struct Shard {
 
 impl Shard {
     pub async fn new(s3client: Client) -> Result<Shard> {
+        println!("new shard created");
+
         let format = format_description::parse("[year]-[month]-[day]_[hour]_[minute]")?;
         let shard_id = uuid::Uuid::new_v4();
         let shard_start_range = time::UtcDateTime::now();
@@ -69,9 +71,9 @@ impl Shard {
     }
 
     pub async fn notify_coordinator(&self) -> Result<()> {
-        let client = reqwest::Client::new();
-
         println!("shard sent, notify_coordinator: {:?}", &self.metadata);
+
+        let client = reqwest::Client::new();
 
         client
             .post("http://localhost:3000/_shard")
@@ -84,7 +86,7 @@ impl Shard {
     }
 
     pub async fn sync_shard_to_storage(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Force checkpoint to consolidate WAL into main database
+        println!("wal force: {:?}", &self.metadata.id);
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .execute(&self.pool)
             .await?;
@@ -92,12 +94,18 @@ impl Shard {
         // Small delay to ensure file system consistency
         tokio::time::sleep(Duration::from_millis(100)).await;
 
+        println!("wal force done: {:?}", &self.metadata.id);
+
+        println!("upload: {:?}", &self.metadata.id);
+
         upload_db_to_s3(
             &self.s3client,
             &self.shard_filename,
             &self.metadata.storage_key,
         )
         .await?;
+
+        println!("upload done: {:?}", &self.metadata.id);
 
         self.notify_coordinator().await?;
 

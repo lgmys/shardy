@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     get_s3_client,
@@ -7,7 +7,10 @@ use crate::{
 };
 
 use anyhow::Result;
-use tokio::io::{self, AsyncReadExt};
+use tokio::{
+    io::{self, AsyncReadExt},
+    sync::Mutex,
+};
 
 pub async fn init_worker() -> Result<()> {
     let _ = tokio::spawn(start()).await?;
@@ -25,22 +28,41 @@ pub async fn start() -> Result<()> {
 
     println!("connected coordinator");
 
-    let shard = Shard::new(client).await?;
+    let shard_ptr = Arc::new(Mutex::new(Shard::new(client.clone()).await?));
 
-    let shard_clone = shard.clone();
+    let shard_clone = shard_ptr.clone();
 
-    let mut i = tokio::time::interval(Duration::from_secs(15));
+    let mut i = tokio::time::interval(Duration::from_secs(60));
+
+    i.tick().await;
 
     tokio::spawn(async move {
         loop {
             i.tick().await;
 
-            println!("sync to object storage");
+            let shard_clone = shard_clone.clone();
+            let client_copy = client.clone();
 
-            shard_clone
-                .sync_shard_to_storage()
-                .await
-                .expect("error syncing shard");
+            println!("sync to object storage started");
+
+            let shard_to_sync = { shard_clone.lock().await.clone() };
+
+            tokio::spawn(async move {
+                shard_to_sync
+                    .sync_shard_to_storage()
+                    .await
+                    .expect("error syncing shard");
+            });
+
+            // TODO: here, we should create a new shard
+
+            {
+                tokio::spawn(async move {
+                    let new_shard = Shard::new(client_copy.clone()).await.unwrap();
+                    let mut ptr = shard_clone.lock().await;
+                    *ptr = new_shard;
+                });
+            }
         }
     });
 
@@ -80,10 +102,12 @@ pub async fn start() -> Result<()> {
 
                 match message {
                     Message::Log(message_log) => {
-                        shard.create_log().await;
+                        shard_ptr.lock().await.create_log().await;
                     }
                     Message::SearchRequest(message_search_request) => {
-                        let shard_results = match shard
+                        let shard_results = match shard_ptr
+                            .lock()
+                            .await
                             .execute_shard_query(
                                 &message_search_request.shard,
                                 &message_search_request.query,
