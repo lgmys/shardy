@@ -6,7 +6,7 @@ use crate::{
 };
 
 use anyhow::Result;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt};
 
 pub async fn create_log(state: &WorkerState) {
     let id = uuid::Uuid::new_v4().to_string();
@@ -40,9 +40,16 @@ pub async fn start(state: WorkerState) -> Result<()> {
 
         let mut len_bytes = [0u8; 4];
 
-        r.read_exact(&mut len_bytes)
-            .await
-            .expect("could not read length");
+        match r.read_exact(&mut len_bytes).await {
+            Ok(0) => {
+                println!("disconnected");
+                break;
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+            }
+            _ => {}
+        };
 
         let len = u32::from_be_bytes(len_bytes) as usize;
 
@@ -57,21 +64,15 @@ pub async fn start(state: WorkerState) -> Result<()> {
                 }
 
                 let message_string = String::from_utf8(buf[..n].into())?;
-                println!("=========");
-                println!("{:?}", &message_string);
 
                 let message: Message =
                     serde_json::from_str(&message_string).expect("could not parse message");
 
                 match message {
                     Message::Log(message_log) => {
-                        dbg!(message_log);
-
                         create_log(&state).await;
                     }
                     Message::SearchRequest(message_search_request) => {
-                        dbg!(&message_search_request);
-
                         let shard_results = match execute_shard_query(
                             &state.client,
                             BUCKET,
@@ -90,12 +91,11 @@ pub async fn start(state: WorkerState) -> Result<()> {
 
                         let search_response = MessageSearchResponse {
                             id: message_search_request.id,
-                            payload: format!(""),
+                            payload: shard_results,
                         };
 
                         let search_response = Message::SearchResponse(search_response);
-                        let search_response = serde_json::to_string(&search_response)?;
-                        let search_response = search_response.into_bytes();
+                        let search_response = serde_json::to_vec(&search_response)?;
 
                         if w.try_write(&search_response.len().to_be_bytes()).is_err() {
                             println!("error");
@@ -112,8 +112,10 @@ pub async fn start(state: WorkerState) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("{}", e);
-                return Err(e.into());
+                break;
             }
         }
     }
+
+    Ok(())
 }

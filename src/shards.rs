@@ -16,6 +16,8 @@ use crate::messages::MessageSearchResponse;
 use crate::object_storage::download_database;
 use crate::object_storage::upload_db_to_s3;
 
+pub type QueryResults = Vec<HashMap<String, String>>;
+
 #[derive(Debug, FromRow, Clone, Deserialize, Serialize)]
 pub struct Shard {
     pub name: String,
@@ -58,6 +60,7 @@ pub async fn checkpoint_and_sync(
 }
 
 pub async fn store_shard(db: &SqlitePool, shard: &Shard) -> Result<()> {
+    // TODO: Add unique check
     sqlx::query("INSERT INTO shards (id, name, s3_path, timestamp) VALUES(?1, ?2, ?3, ?4)")
         .bind(&shard.id)
         .bind(&shard.name)
@@ -99,8 +102,8 @@ pub async fn execute_shard_query(
     bucket: &str,
     shard: &Shard,
     query: &str,
-) -> Result<Vec<HashMap<String, String>>> {
-    let mut results: Vec<HashMap<String, String>> = vec![];
+) -> Result<QueryResults> {
+    let mut results: QueryResults = vec![];
 
     let (pool, _temp_file) = open_database_from_s3(client, bucket, &shard.s3_path).await?;
 
@@ -133,7 +136,7 @@ pub async fn schedule_query(
     results: Arc<Mutex<HashMap<String, MessageSearchResponse>>>,
     pattern: &str,
     query: &str,
-) -> Result<Vec<HashMap<String, String>>> {
+) -> Result<QueryResults> {
     // TODO: make shard time window dynamic (based on query itself partially)
     let shards = sqlx::query_as::<_, Shard>(
         "SELECT * FROM shards WHERE name = ?1 AND timestamp > datetime('now', '-60 minutes')",
@@ -163,33 +166,39 @@ pub async fn schedule_query(
         );
     }
 
-    let mut combined_results: Vec<HashMap<String, String>> = vec![];
+    println!("{} queries running", queries.len());
+
+    let mut combined_results: QueryResults = vec![];
 
     let mut count: usize = 0;
 
+    let start = time::UtcDateTime::now().unix_timestamp();
+
     loop {
+        let end = time::UtcDateTime::now().unix_timestamp();
+
+        if end - start == 5 {
+            println!("timeout");
+            break;
+        }
+
         for id in queries.clone() {
-            if let Some(result) = results.lock().await.get(&id) {
+            if let Some(result) = results.lock().await.remove(&id) {
+                combined_results.append(&mut result.payload.clone());
                 count += 1;
             }
         }
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        if count == queries.len() {
-            println!("all queries executed");
-            break;
-        } else {
+        if count != queries.len() {
             println!("{} queries done", count);
+        } else {
+            break;
         }
     }
 
-    // TODO: run in sequences of at most 10 requests at the same time
-    // let future_results = join_all(futures).await;
-    //
-    // for res in future_results {
-    //     combined_results.append(&mut res.unwrap().clone());
-    // }
+    println!("all {} queries done", count);
 
     println!("results: {}", combined_results.len());
 

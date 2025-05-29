@@ -43,8 +43,16 @@ pub async fn start_coordinator(state: ApiState) -> Result<()> {
             loop {
                 let mut len_bytes = [0u8; 4];
 
-                if r.read_exact(&mut len_bytes).await.is_err() {
-                    continue;
+                match r.read_exact(&mut len_bytes).await {
+                    Ok(0) => {
+                        println!("disconnected");
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        break;
+                    }
+                    _ => {}
                 }
 
                 let len = u32::from_be_bytes(len_bytes) as usize;
@@ -59,7 +67,6 @@ pub async fn start_coordinator(state: ApiState) -> Result<()> {
 
                         let message =
                             String::from_utf8(message.into()).expect("could not read string");
-                        println!("{:?}", &message);
 
                         let message: Message =
                             serde_json::from_str(&message).expect("could not parse message");
