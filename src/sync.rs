@@ -3,8 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::{
-    new_shard,
-    shards::{checkpoint_and_sync, post_shard},
+    shards::{checkpoint_and_sync, new_shard, post_shard},
     state::WorkerState,
 };
 

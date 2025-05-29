@@ -1,13 +1,9 @@
 use anyhow::Result;
-use aws_sdk_s3::{
-    Client,
-    config::{Credentials, Region},
-};
 use axum::Router;
-use shards::{ShardHandle, ShardMetadata, new_shard};
+use object_storage::get_s3_client;
 use std::{collections::HashMap, env, sync::Arc};
-use time::format_description;
 use tokio::sync::Mutex;
+use worker::init_worker;
 
 mod coordinator;
 mod db;
@@ -23,28 +19,10 @@ mod worker;
 
 use db::connect_with_options;
 use routes::get_router;
-use schema::{create_logs_table, create_shards_table};
-use state::{ApiState, WorkerState};
+use schema::create_shards_table;
+use state::ApiState;
 
 const BUCKET: &'static str = "logs";
-
-fn get_s3_client() -> Client {
-    let key_id = "root".to_string();
-    let secret_key = "changeme".to_string();
-
-    let cred = Credentials::new(key_id, secret_key, None, None, "loaded-from-custom-env");
-    let store_url = "http://localhost:9000";
-
-    let s3_config = aws_sdk_s3::config::Builder::new()
-        .endpoint_url(store_url)
-        .credentials_provider(cred)
-        .region(Region::new("eu-central-1"))
-        .behavior_version_latest()
-        .force_path_style(true)
-        .build();
-
-    return aws_sdk_s3::Client::from_conf(s3_config);
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -92,24 +70,6 @@ async fn init_web(state: ApiState) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, router).await?;
-
-    Ok(())
-}
-
-async fn init_worker() -> Result<()> {
-    let client = get_s3_client();
-
-    let state = WorkerState {
-        client: client.clone(),
-        shard: Arc::new(Mutex::new(new_shard().await?)),
-    };
-
-    // NOTE: periodically syncs temp log file to s3
-
-    tokio::spawn(sync::run_sync_periodically(state.clone()));
-    tokio::spawn(sync::regenerate_shard(state.clone()));
-
-    let _ = tokio::spawn(worker::start(state.clone())).await?;
 
     Ok(())
 }

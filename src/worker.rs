@@ -1,11 +1,18 @@
+use std::sync::Arc;
+
 use crate::{
+    get_s3_client,
     messages::{Message, MessageSearchResponse},
-    shards::execute_shard_query,
+    shards::{execute_shard_query, new_shard},
     state::WorkerState,
+    sync,
 };
 
 use anyhow::Result;
-use tokio::io::{self, AsyncReadExt};
+use tokio::{
+    io::{self, AsyncReadExt},
+    sync::Mutex,
+};
 
 pub async fn create_log(state: WorkerState) {
     let id = uuid::Uuid::new_v4().to_string();
@@ -23,6 +30,24 @@ pub async fn create_log(state: WorkerState) {
     } else {
         println!("log created");
     }
+}
+
+pub async fn init_worker() -> Result<()> {
+    let client = get_s3_client();
+
+    let state = WorkerState {
+        client: client.clone(),
+        shard: Arc::new(Mutex::new(new_shard().await?)),
+    };
+
+    // NOTE: periodically syncs temp log file to s3
+
+    tokio::spawn(sync::run_sync_periodically(state.clone()));
+    tokio::spawn(sync::regenerate_shard(state.clone()));
+
+    let _ = tokio::spawn(start(state.clone())).await?;
+
+    Ok(())
 }
 
 pub async fn start(state: WorkerState) -> Result<()> {

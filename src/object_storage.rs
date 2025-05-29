@@ -1,10 +1,29 @@
 use anyhow::Result;
 use aws_sdk_s3::Client;
+use aws_sdk_s3::config::{Credentials, Region};
 use tempfile::NamedTempFile;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
 use crate::BUCKET;
+
+pub fn get_s3_client() -> Client {
+    let key_id = "root".to_string();
+    let secret_key = "changeme".to_string();
+
+    let cred = Credentials::new(key_id, secret_key, None, None, "loaded-from-custom-env");
+    let store_url = "http://localhost:9000";
+
+    let s3_config = aws_sdk_s3::config::Builder::new()
+        .endpoint_url(store_url)
+        .credentials_provider(cred)
+        .region(Region::new("eu-central-1"))
+        .behavior_version_latest()
+        .force_path_style(true)
+        .build();
+
+    return aws_sdk_s3::Client::from_conf(s3_config);
+}
 
 pub async fn upload_db_to_s3(
     client: &Client,
