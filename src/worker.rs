@@ -1,62 +1,48 @@
-use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{
     get_s3_client,
     messages::{Message, MessageSearchResponse},
-    shards::{execute_shard_query, new_shard},
-    state::WorkerState,
-    sync,
+    shards::Shard,
 };
 
 use anyhow::Result;
-use tokio::{
-    io::{self, AsyncReadExt},
-    sync::Mutex,
-};
-
-pub async fn create_log(state: WorkerState) {
-    let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = time::UtcDateTime::now();
-    let message = format!("http log {}", timestamp);
-
-    if let Err(err) = sqlx::query("INSERT INTO logs (id, timestamp, message) VALUES (?1, ?2, ?3)")
-        .bind(id)
-        .bind(timestamp.to_string())
-        .bind(message)
-        .execute(&state.shard.lock().await.pool)
-        .await
-    {
-        println!("error {}", err);
-    } else {
-        println!("log created");
-    }
-}
+use tokio::io::{self, AsyncReadExt};
 
 pub async fn init_worker() -> Result<()> {
-    let client = get_s3_client();
-
-    let state = WorkerState {
-        client: client.clone(),
-        shard: Arc::new(Mutex::new(new_shard().await?)),
-    };
-
-    // NOTE: periodically syncs temp log file to s3
-
-    tokio::spawn(sync::run_sync_periodically(state.clone()));
-    tokio::spawn(sync::regenerate_shard(state.clone()));
-
-    let _ = tokio::spawn(start(state.clone())).await?;
+    let _ = tokio::spawn(start()).await?;
 
     Ok(())
 }
 
-pub async fn start(state: WorkerState) -> Result<()> {
+pub async fn start() -> Result<()> {
+    let client = get_s3_client();
+
     let socket = tokio::net::TcpSocket::new_v4()?;
     let mut stream = socket.connect("127.0.0.1:6666".parse()?).await?;
 
     let (mut r, w) = stream.split();
 
     println!("connected coordinator");
+
+    let shard = Shard::new(client).await?;
+
+    let shard_clone = shard.clone();
+
+    let mut i = tokio::time::interval(Duration::from_secs(15));
+
+    tokio::spawn(async move {
+        loop {
+            i.tick().await;
+
+            println!("sync to object storage");
+
+            shard_clone
+                .sync_shard_to_storage()
+                .await
+                .expect("error syncing shard");
+        }
+    });
 
     loop {
         // Wait for the socket to be readable
@@ -94,15 +80,15 @@ pub async fn start(state: WorkerState) -> Result<()> {
 
                 match message {
                     Message::Log(message_log) => {
-                        create_log(state.clone()).await;
+                        shard.create_log().await;
                     }
                     Message::SearchRequest(message_search_request) => {
-                        let shard_results = match execute_shard_query(
-                            &state.client,
-                            &message_search_request.shard,
-                            &message_search_request.query,
-                        )
-                        .await
+                        let shard_results = match shard
+                            .execute_shard_query(
+                                &message_search_request.shard,
+                                &message_search_request.query,
+                            )
+                            .await
                         {
                             Ok(shard_results) => shard_results,
                             Err(e) => {

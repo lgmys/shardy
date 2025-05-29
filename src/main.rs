@@ -12,7 +12,6 @@ mod object_storage;
 mod schema;
 mod shards;
 mod state;
-mod sync;
 mod web;
 mod worker;
 
