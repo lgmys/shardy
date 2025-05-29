@@ -4,7 +4,7 @@ use aws_sdk_s3::{
     config::{Credentials, Region},
 };
 use axum::Router;
-use shards::{ShardHandle, ShardMetadata};
+use shards::{ShardHandle, ShardMetadata, new_shard};
 use std::{collections::HashMap, env, sync::Arc};
 use time::format_description;
 use tokio::sync::Mutex;
@@ -76,16 +76,16 @@ async fn main() -> Result<()> {
     };
 
     if subcommand == "worker" {
-        start_worker().await?;
+        init_worker().await?;
     } else {
         tokio::spawn(coordinator::start_coordinator(state.clone()));
-        start_web(state.clone()).await?;
+        init_web(state.clone()).await?;
     }
 
     Ok(())
 }
 
-async fn start_web(state: ApiState) -> Result<()> {
+async fn init_web(state: ApiState) -> Result<()> {
     let router = Router::new()
         .merge(get_router(state.clone()))
         .with_state(state.clone());
@@ -96,41 +96,12 @@ async fn start_web(state: ApiState) -> Result<()> {
     Ok(())
 }
 
-pub async fn get_shard() -> Result<ShardHandle> {
-    let format = format_description::parse("[year]-[month]-[day]_[hour]_[minute]")?;
-    let shard_id = uuid::Uuid::new_v4();
-    let shard_start_range = time::UtcDateTime::now();
-    let shart_start_range_string = shard_start_range.format(&format)?;
-    let shard_filename = format!("logs.{}.{}.db", &shart_start_range_string, &shard_id);
-
-    // TODO: This this should be autorotated periodically somehow
-    let mut shard_path = std::env::temp_dir();
-    shard_path.push(format!("sqlite_temp_{}.db", uuid::Uuid::new_v4()));
-    let shard_url = format!("sqlite:{}", shard_path.display());
-    let shard_pool = connect_with_options(&shard_url).await?;
-
-    sqlx::query("SELECT 1 = 1").execute(&shard_pool).await?;
-
-    create_logs_table(&shard_pool).await?;
-
-    Ok(ShardHandle {
-        metadata: ShardMetadata {
-            timestamp: shard_start_range.to_string(),
-            s3_path: shard_filename.clone(),
-            id: shard_id.to_string(),
-            name: "logs".to_owned(),
-        },
-        pool: shard_pool,
-        shard_filename: shard_path.to_str().unwrap().to_owned(),
-    })
-}
-
-async fn start_worker() -> Result<()> {
+async fn init_worker() -> Result<()> {
     let client = get_s3_client();
 
     let state = WorkerState {
         client: client.clone(),
-        shard: Arc::new(Mutex::new(get_shard().await?)),
+        shard: Arc::new(Mutex::new(new_shard().await?)),
     };
 
     // NOTE: periodically syncs temp log file to s3

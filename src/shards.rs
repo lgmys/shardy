@@ -8,13 +8,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
+use time::format_description;
 use tokio::sync::Mutex;
 
+use crate::db::connect_with_options;
 use crate::messages::Message;
 use crate::messages::MessageSearchRequest;
 use crate::messages::MessageSearchResponse;
 use crate::object_storage::download_database;
 use crate::object_storage::upload_db_to_s3;
+use crate::schema::create_logs_table;
 
 pub type QueryResults = Vec<HashMap<String, String>>;
 
@@ -30,6 +33,35 @@ pub struct ShardHandle {
     pub metadata: ShardMetadata,
     pub pool: SqlitePool,
     pub shard_filename: String,
+}
+
+pub async fn new_shard() -> Result<ShardHandle> {
+    let format = format_description::parse("[year]-[month]-[day]_[hour]_[minute]")?;
+    let shard_id = uuid::Uuid::new_v4();
+    let shard_start_range = time::UtcDateTime::now();
+    let shart_start_range_string = shard_start_range.format(&format)?;
+    let shard_filename = format!("logs.{}.{}.db", &shart_start_range_string, &shard_id);
+
+    // TODO: This this should be autorotated periodically somehow
+    let mut shard_path = std::env::temp_dir();
+    shard_path.push(format!("sqlite_temp_{}.db", uuid::Uuid::new_v4()));
+    let shard_url = format!("sqlite:{}", shard_path.display());
+    let shard_pool = connect_with_options(&shard_url).await?;
+
+    sqlx::query("SELECT 1 = 1").execute(&shard_pool).await?;
+
+    create_logs_table(&shard_pool).await?;
+
+    Ok(ShardHandle {
+        metadata: ShardMetadata {
+            timestamp: shard_start_range.to_string(),
+            s3_path: shard_filename.clone(),
+            id: shard_id.to_string(),
+            name: "logs".to_owned(),
+        },
+        pool: shard_pool,
+        shard_filename: shard_path.to_str().unwrap().to_owned(),
+    })
 }
 
 pub async fn post_shard(payload: &ShardMetadata) -> Result<()> {

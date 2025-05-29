@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::{
-    get_shard,
+    new_shard,
     shards::{checkpoint_and_sync, post_shard},
     state::WorkerState,
 };
@@ -31,7 +31,7 @@ pub async fn regenerate_shard(state: WorkerState) -> Result<()> {
             println!("could not sync")
         }
 
-        let new_shard = get_shard().await?;
+        let new_shard = new_shard().await?;
 
         {
             let mut shard = { state.shard.lock().await };
