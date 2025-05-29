@@ -60,6 +60,16 @@ pub async fn checkpoint_and_sync(
 }
 
 pub async fn store_shard(db: &SqlitePool, shard: &Shard) -> Result<()> {
+    let exists = sqlx::query("SELECT * FROM shards WHERE id = ?1")
+        .bind(&shard.id)
+        .fetch_optional(db)
+        .await?;
+
+    // If shard already exists, do nothing
+    if exists.is_some() {
+        return Ok(());
+    }
+
     // TODO: Add unique check
     sqlx::query("INSERT INTO shards (id, name, s3_path, timestamp) VALUES(?1, ?2, ?3, ?4)")
         .bind(&shard.id)
