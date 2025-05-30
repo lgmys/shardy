@@ -1,9 +1,0 @@
-[watch]
-ignore = [
-    "*.tmp",
-    "*.log", 
-    "*.bak",
-    "target/**",
-    "logs/**",
-    ".http/*.http"
-]

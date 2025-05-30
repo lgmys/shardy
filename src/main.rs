@@ -1,6 +1,6 @@
 use anyhow::Result;
 use object_storage::get_s3_client;
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use worker::init_worker;
 
@@ -19,15 +19,26 @@ use db::connect_with_options;
 use schema::create_shards_table;
 use state::ApiState;
 
+use clap::Parser;
+
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Name of the person to greet
+    #[arg(short, long)]
+    mode: String,
+}
+
 const BUCKET: &'static str = "logs";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let subcommand = args.get(2).unwrap_or(&"api".to_owned()).clone();
-    println!("Running in mode: {}", &subcommand);
+    let args = Args::parse();
 
-    if subcommand == "worker" {
+    println!("Running in mode: {}", &args.mode);
+
+    if args.mode == "worker" {
         init_worker().await?;
     } else {
         let cwd = std::env::current_dir()?;
