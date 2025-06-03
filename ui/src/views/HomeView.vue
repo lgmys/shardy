@@ -1,5 +1,9 @@
-<script setup lang="ts"></script>
+<script setup lang="ts">
+import SampleAsyncTable from '@/components/SampleAsyncTable.vue'
+</script>
 
 <template>
-  <main>welcome</main>
+  <main>
+    <SampleAsyncTable />
+  </main>
 </template>

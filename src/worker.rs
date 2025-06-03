@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{
     get_s3_client,
     messages::{Message, MessageSearchResponse},
-    shards::Shard,
+    shards::{QueryResult, Shard},
 };
 
 use anyhow::Result;
@@ -121,7 +121,10 @@ pub async fn start() -> Result<()> {
                                     &message_search_request.shard.id, e
                                 );
 
-                                vec![]
+                                QueryResult {
+                                    items: vec![],
+                                    columns: vec![],
+                                }
                             }
                         };
 

@@ -19,7 +19,13 @@ use crate::object_storage::download_database;
 use crate::object_storage::upload_db_to_s3;
 use crate::schema::create_logs_table;
 
-pub type QueryResults = Vec<HashMap<String, String>>;
+pub type QueryResultSet = Vec<HashMap<String, String>>;
+
+#[derive(Clone, Deserialize, Serialize, Debug)]
+pub struct QueryResult {
+    pub items: QueryResultSet,
+    pub columns: Vec<String>,
+}
 
 #[derive(Debug, FromRow, Clone, Deserialize, Serialize)]
 pub struct ShardMetadata {
@@ -136,8 +142,8 @@ impl Shard {
         &self,
         shard: &ShardMetadata,
         query: &str,
-    ) -> Result<QueryResults> {
-        let mut results: QueryResults = vec![];
+    ) -> Result<QueryResult> {
+        let mut result_set: QueryResultSet = vec![];
 
         let (pool, _temp_file) = self.open_database_from_s3(&shard.storage_key).await?;
 
@@ -156,10 +162,23 @@ impl Shard {
                 }
             }
 
-            results.push(row_as_map);
+            result_set.push(row_as_map);
         }
 
         pool.close().await;
+
+        let mut columns: Vec<String> = vec![];
+
+        for key in result_set.first().unwrap_or(&HashMap::new()).keys() {
+            columns.push(key.to_owned());
+        }
+
+        columns.sort();
+
+        let results = QueryResult {
+            items: result_set,
+            columns,
+        };
 
         Ok(results)
     }
@@ -190,7 +209,7 @@ pub async fn schedule_query(
     results: Arc<Mutex<HashMap<String, MessageSearchResponse>>>,
     pattern: &str,
     query: &str,
-) -> Result<QueryResults> {
+) -> Result<QueryResult> {
     // TODO: make shard time window dynamic (based on query itself partially)
     let shards = sqlx::query_as::<_, ShardMetadata>(
         "SELECT * FROM shards WHERE name = ?1 AND timestamp > datetime('now', '-60 minutes')",
@@ -222,7 +241,8 @@ pub async fn schedule_query(
 
     println!("{} queries running", queries.len());
 
-    let mut combined_results: QueryResults = vec![];
+    let mut combined_results: QueryResultSet = vec![];
+    let mut combined_columns: Vec<String> = vec![];
 
     let mut count: usize = 0;
 
@@ -238,7 +258,8 @@ pub async fn schedule_query(
 
         for id in queries.clone() {
             if let Some(result) = results.lock().await.remove(&id) {
-                combined_results.append(&mut result.payload.clone());
+                combined_results.append(&mut result.payload.items.clone());
+                combined_columns.append(&mut result.payload.columns.clone());
                 count += 1;
             }
         }
@@ -252,13 +273,19 @@ pub async fn schedule_query(
         }
     }
 
+    combined_columns.dedup();
+    combined_columns.sort();
+
     println!("all {} queries done", count);
 
     println!("results: {}", combined_results.len());
 
     println!("==============");
 
-    Ok(combined_results)
+    Ok(QueryResult {
+        columns: combined_columns,
+        items: combined_results,
+    })
 }
 
 pub async fn store_shard(pool: &SqlitePool, metadata: &ShardMetadata) -> Result<()> {

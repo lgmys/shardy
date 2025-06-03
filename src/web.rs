@@ -14,6 +14,8 @@ use crate::{
     state::ApiState,
 };
 
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+
 pub fn get_router(state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/", get(info))
@@ -80,9 +82,15 @@ async fn logs(state: State<ApiState>) -> impl IntoResponse {
 }
 
 pub async fn init_web(state: ApiState) -> Result<()> {
+    let cors_layer = CorsLayer::new()
+        .allow_methods(AllowMethods::any())
+        .allow_headers(AllowHeaders::any())
+        .allow_origin(AllowOrigin::any());
+
     let router = Router::new()
         .merge(get_router(state.clone()))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        .layer(cors_layer);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, router).await?;

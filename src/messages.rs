@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::shards::{QueryResults, ShardMetadata};
+use crate::shards::{QueryResult, ShardMetadata};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MessageLog {
@@ -17,7 +17,7 @@ pub struct MessageSearchRequest {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageSearchResponse {
     pub id: String,
-    pub payload: QueryResults,
+    pub payload: QueryResult,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
